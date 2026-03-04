@@ -140,7 +140,7 @@ def load_bone_data(sample_names, target_size=(100, 100, 100)):
 # 5. TRAINING LOOP
 # =================================================================
 
-def train_pipeline(skeletons, params, epochs=100, batch_size=2):
+def train_pipeline(skeletons, params, epochs=1000, batch_size=2):
     dataset = tf.data.Dataset.from_tensor_slices((skeletons, params)).shuffle(100).batch(batch_size)
     
     vae, encoder, decoder = build_vae()
@@ -149,7 +149,7 @@ def train_pipeline(skeletons, params, epochs=100, batch_size=2):
     
     # Phase 1: Train VAE
     print("\n--- Phase 1: Training VAE (Reconstruction) ---")
-    vae_optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
+    vae_optimizer = tf.keras.optimizers.Adam(learning_rate=5e-5)
     
     @tf.function
     def train_step_vae(x):
@@ -168,12 +168,16 @@ def train_pipeline(skeletons, params, epochs=100, batch_size=2):
         for x_batch, _ in dataset:
             loss = train_step_vae(x_batch)
             epoch_loss += loss
+        avg_loss = epoch_loss/len(dataset)
         if (epoch + 1) % 10 == 0:
-            print(f"Epoch {epoch+1}/{epochs}, VAE Loss: {epoch_loss/len(dataset):.6f}")
+            print(f"Epoch {epoch+1}/{epochs}, VAE Loss: {avg_loss:.7f}")
+        if avg_loss < 1e-6:
+            print(f"VAE converged at epoch {epoch+1}")
+            break
 
     # Phase 2: Train Feature Predictor
     print("\n--- Phase 2: Training Feature Predictor ---")
-    fp_optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
+    fp_optimizer = tf.keras.optimizers.Adam(learning_rate=5e-5)
     
     @tf.function
     def train_step_fp(x, p):
@@ -190,12 +194,16 @@ def train_pipeline(skeletons, params, epochs=100, batch_size=2):
         for x_batch, p_batch in dataset:
             loss = train_step_fp(x_batch, p_batch)
             epoch_loss += loss
+        avg_loss = epoch_loss/len(dataset)
         if (epoch + 1) % 10 == 0:
-            print(f"Epoch {epoch+1}/{epochs}, FP Loss: {epoch_loss/len(dataset):.6f}")
+            print(f"Epoch {epoch+1}/{epochs}, FP Loss: {avg_loss:.7f}")
+        if avg_loss < 1e-6:
+            print(f"FP converged at epoch {epoch+1}")
+            break
 
     # Phase 3: Train Latent Diffusion
     print("\n--- Phase 3: Training Latent Diffusion ---")
-    ldm_optimizer = tf.keras.optimizers.Adam(learning_rate=1e-4)
+    ldm_optimizer = tf.keras.optimizers.Adam(learning_rate=5e-5)
     
     @tf.function
     def train_step_ldm(x, p):
@@ -220,18 +228,22 @@ def train_pipeline(skeletons, params, epochs=100, batch_size=2):
         for x_batch, p_batch in dataset:
             loss = train_step_ldm(x_batch, p_batch)
             epoch_loss += loss
+        avg_loss = epoch_loss/len(dataset)
         if (epoch + 1) % 10 == 0:
-            print(f"Epoch {epoch+1}/{epochs}, LDM Loss: {epoch_loss/len(dataset):.6f}")
+            print(f"Epoch {epoch+1}/{epochs}, LDM Loss: {avg_loss:.7f}")
+        if avg_loss < 1e-6:
+            print(f"LDM converged at epoch {epoch+1}")
+            break
 
     return vae, fp, ldm
 
 if __name__ == "__main__":
-    sample_names = [f'rand{i}' for i in range(1, 12)]
+    sample_names = [f'rand{i}' for i in range(1, 34)]
     skeletons, params, p_mean, p_std = load_bone_data(sample_names)
     
     if skeletons is not None:
         print(f"Dataset ready. Skeletons: {skeletons.shape}, Params: {params.shape}")
-        vae, fp, ldm = train_pipeline(skeletons, params, epochs=100)
+        vae, fp, ldm = train_pipeline(skeletons, params, epochs=1000)
         
         # Save models
         vae.save("vae_bone_tf")

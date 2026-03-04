@@ -1124,7 +1124,7 @@ voxeld = np.load('s01_voxel.npy')
 print(voxeld.shape)
 rng = np.random.default_rng()
 
-for i in range(2, 12):
+for i in range(13, 2000):
     run_start = time.time()
     savename = f'rand{i}'
     print(f'\n--- Starting run: {savename} ---')
