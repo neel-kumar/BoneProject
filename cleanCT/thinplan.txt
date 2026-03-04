@@ -1,0 +1,63 @@
+two image:
+check old for s/e/v -open, and if shape point
+check new/current to check for simple point
+
+thr = -maxint + i (i >= 1) - delete
+black, marked = i
+before: black >= thr
+cur: white < 0, black >= 0
+
+
+
+simple point:
+	(26,6)
+	1. p has at least one black 26-neighbor.
+	2. p has at least one white 6-neighbor.
+	3. The set of black 26-neighbors of p is 26-connected.
+	4. The set of white 6-neighbors of p is 6-connected in the set of white 18-neighbors of p.
+
+
+shape point:
+	black
+
+	cond 1:
+	some plane with 6-closed path
+	6-closed in the middle, Fig 4 - you can just check every combo
+	surface right on top and bottom have at least 1 black
+
+	OR
+
+	cond 2:
+	pair of opposite s-points (a,d)
+	a is white
+	d or f1(d, p) is white
+	- whats f1: point that is 6-adj to d and 26-adj to p
+	sets contain at least one black point - figure out how to define sets
+	- e - 2 letter on diagram
+	- v - 3 letter on diagram
+	- js define the funcs
+	check all manually
+
+
+
+
+cond 3:
+	every middle plane
+	- all e-points black before current it
+	OR
+	- all black points in that middle plane form 26-connected comp
+	- no tunnel - if at least one of the middle plane s-points(remaining ones except for a,d) is white there is no tunnel
+
+
+
+
+
+
+PRIMARY thinning:
+	-each iteration is 3 scans
+
+	1st: unmarked s-open is marked if it is a shape point, if not a shape but is simple point it is deleted, else unmarked
+
+	2nd: e-open point can never be a shape point (can never be marked), so unmarked: e-open, simple points satisfying Condition 3 are deleted
+
+	3rd: unmarked v-open points that are simple points are deleted

@@ -1,0 +1,682 @@
+import time
+import subprocess
+import numpy as np
+from scipy.ndimage import label
+from solid import *
+
+MAXINT = 1000000
+
+def scout(filename, obj, to_stl=False):
+    st = time.time()
+
+    scad_render_to_file(obj, filename + '.scad')
+    print('to openscad: ' + filename + '.scad')
+    if to_stl:
+        print("to stl")
+        subprocess.run([r'C:\Program Files\OpenSCAD\openscad.exe', '-o', filename + '.stl', './' + filename + '.scad'])
+
+    print(f"scout elapsed: {time.time() - st:.2f} seconds")
+
+def render_3d_mat(mat, cube_size=0.1):
+    positions = np.argwhere(mat)
+    if len(positions) == 0:
+        return cube(0)
+    cells = None
+    for z, y, x in positions:
+        c = translate([x * cube_size, y * cube_size, z * cube_size])(cube(cube_size))
+        cells = c if cells is None else cells + c
+    return cells
+
+def count_ones_3x3(mat, p):
+    """Count non-zero values in the 3x3x3 neighborhood around point p (including p itself)."""
+    z, y, x = p
+    nb = mat[max(0, z-1):z+2, max(0, y-1):y+2, max(0, x-1):x+2]
+    return int((nb != 0).sum())
+
+def render_3d_mat_color2(mat, mx_count=3, cube_size=0.1):
+    binary = mat
+    positions = np.argwhere(binary)
+    if len(positions) == 0:
+        return cube(0)
+    cells = None
+    for z, y, x in positions:
+        cnt = count_ones_3x3(binary, (z, y, x))
+        if cnt <= mx_count:
+            c = color([0.68, 0.85, 0.90])(cube(cube_size))  # light blue
+        else:
+            c = color([1.0, 0.70, 0.70])(cube(cube_size))  # light red
+        c = translate([x * cube_size, y * cube_size, z * cube_size])(c)
+        cells = c if cells is None else cells + c
+    return cells
+
+def render_3d_mat_color(mat, fi, cube_size=0.1):
+    thr = -MAXINT + fi
+    positions = np.argwhere(mat >= thr)
+    if len(positions) == 0:
+        return cube(0)
+    
+    # Pad to safely check neighbors
+    padded = np.pad(mat, 1, constant_values=-MAXINT)
+    cells = None
+    old_img = (padded >= thr-1) 
+    
+    for z, y, x in positions:
+        p_pad = (z + 1, y + 1, x + 1)
+
+        # if mat[z,y,x] > 0:
+        if cond2_len(p_pad, padded, thr):
+            # V-points: less red
+            c = color([0.8, 0.4, 0.4])(cube(cube_size))
+        elif cond1(p_pad, padded, thr):
+            # S-points: Blue
+            c = color([0.4, 0.5, 0.8])(cube(cube_size))
+        elif mat[z,y,x] == thr and is_s_open(p_pad, old_img):
+            # red
+            c = color([1, 0, 0])(cube(cube_size))
+        elif mat[z,y,x] > 0:
+            # E-points: Green
+            c = color([0.5, 0.7, 0.5])(cube(cube_size))
+        else:
+            # Interior: Gray
+            c = color([0.5, 0.5, 0.5])(cube(cube_size))
+            
+        c = translate([x * cube_size, y * cube_size, z * cube_size])(c)
+        cells = c if cells is None else cells + c
+        
+    return cells
+
+# saha
+
+S_PTS = [(0,0,1),(0,0,-1),(0,1,0),(0,-1,0),(1,0,0),(-1,0,0)]
+
+# Three unordered pairs of opposite s-point offsets (dz, dy, dx)
+OPPOSITE_PAIRS = [
+    ((-1,0,0), (1,0,0)),   # Top / Bottom
+    ((0,-1,0), (0,1,0)),   # North / South
+    ((0,0,-1), (0,0,1)),   # West / East
+]
+
+def is_s_open(s, mat):
+    # print('is_s_open')
+    # print(s)
+    z, y, x = s
+    for sp in S_PTS:
+        dz,dy,dx = sp
+        # print((z+dz,y+dy,x+dx), mat[(z+dz,y+dy,x+dx)])
+        if mat[(z+dz,y+dy,x+dx)] == 0:
+            return True
+
+def surface(a_off, s):
+    z, y, x = s
+    dz, dy, dx = a_off
+    positions = []
+    
+    # Each surface contains exactly nine points [2].
+    # These points form a 3x3 plane orthogonal to the axis of a_off [1].
+    for i in [-1, 0, 1]:
+        for j in [-1, 0, 1]:
+            if dz != 0:
+                # Offset is along Z-axis: Surface is in the (z+dz) plane, vary Y and X
+                positions.append((dz, i, j))
+            elif dy != 0:
+                # Offset is along Y-axis: Surface is in the (y+dy) plane, vary Z and X
+                positions.append((i, dy, j))
+            else:
+                # Offset is along X-axis: Surface is in the (x+dx) plane, vary Z and Y
+                positions.append((i, j, dx))
+                
+    return positions
+
+def check_6closed(white_em_offsets):
+    """
+    Generates a list of valid 6-closed paths that encircle p and
+    checks if any are fully contained in white_em_offsets.
+    
+    Assumes a Top/Bottom pair (axis index 0), where encirclement 
+    requires PN (0, 1, 0) and PE (0, 0, 1) [Source 44].
+    """
+    # 1. Nomenclature Mapping (Offsets relative to p) [Source 28, 33]
+    PN, PS, PE, PW = (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)
+    PNE, PSE, PSW, PNW = (0, 1, 1), (0, -1, 1), (0, -1, -1), (0, 1, -1)
+    
+    # f-extensions for the 'bulged' 10-point paths [Source 30, 33]
+    f1S, f2SE, f2SW = (0, -2, 0), (0, -2, 1), (0, -2, -1)
+    f1W, f2WN, f2WS = (0, 0, -2), (0, 1, -2), (0, -1, -2)
+
+    # 2. Define Valid 6-Closed Paths
+    # All paths include PN and PE to satisfy the encirclement rule [Source 44].
+    valid_circuits = [
+        # Path A: Standard 8-point ring in the Middle Plane (M)
+        [PN, PNE, PE, PSE, PS, PSW, PW, PNW],
+        
+        # Path B: 10-point ring 'bulging' into the South extension
+        # (Replaces PS with f2SE -> f1S -> f2SW)
+        [PN, PNE, PE, PSE, f2SE, f1S, f2SW, PSW, PW, PNW],
+        
+        # Path C: 10-point ring 'bulging' into the West extension
+        # (Replaces PW with f2WS -> f1W -> f2WN)
+        [PN, PNE, PE, PSE, PS, PSW, f2WS, f1W, f2WN, PNW],
+        
+        # Path D: 12-point ring bulging into both extensions
+        [PN, PNE, PE, PSE, f2SE, f1S, f2SW, PSW, f2WS, f1W, f2WN, PNW]
+    ]
+
+    # 3. Check membership
+    white_set = set(white_em_offsets)
+    for i, circuit in enumerate(valid_circuits):
+        # A set is valid if every offset in the circuit is currently white
+        if all(offset in white_set for offset in circuit):
+            # print(f"Path {i} found in white_em_offsets")
+            return True
+            
+    return False
+
+def cond1(p, img, thr):
+    """
+    Strict implementation of Condition 1: Arc-like shape.
+    Requires a 6-closed path of white points in the Extended Middle Plane 
+    encircling p [Source 43, 44].
+    """
+    # Define s-neighbors and nomenclature [Source 28, 31]
+    PT, PN, PE = (-1, 0, 0), (0, 1, 0), (0, 0, 1) # Top, North, East
+    PS, PB, PW = (0, -1, 0), (1, 0, 0), (0, 0, -1) # South, Bottom, West
+    
+    # Opposite pairs of s-neighbors (dz, dy, dx)
+    OPPOSITE_PAIRS = [
+        ((-1,0,0), (1,0,0)), # Top/Bottom
+        ((0,1,0), (0,-1,0)), # North/South
+        ((0,0,1), (0,0,-1))  # East/West
+    ]
+
+    def is_white(offset):
+        # 'white before the iteration': value < thr [Source 37]
+        nb_pt = (p[0]+offset[0], p[1]+offset[1], p[2]+offset[2])
+        if any(c < 0 or c >= img.shape[i] for i, c in enumerate(nb_pt)):
+            return True
+        return img[nb_pt] < thr
+
+    for a_off, d_off in OPPOSITE_PAIRS:
+        # 1. Surface Check: both surfaces must contain at least one black point [Source 43, 45]
+        surf_a = surface(a_off, p)
+        surf_d = surface(d_off, p)
+        if not (any(not is_white(off) for off in surf_a) and 
+                any(not is_white(off) for off in surf_d)):
+            continue
+
+        # 2. Build Extended Middle Plane (EM) offsets [Source 32, 33]
+        # Identify 'other' 4 s-neighbors in the middle plane
+        others = [o for o in [PT, PB, PN, PS, PE, PW] if o != a_off and o != d_off]
+        
+        # Base Middle Plane (8 points)
+        em_offsets = others.copy() # s-points (4)
+        for i in range(len(others)):
+            for j in range(i + 1, len(others)):
+                if others[i] != tuple(-np.array(others[j])): # non-opposite
+                    # e-points (4)
+                    em_offsets.append(tuple(np.array(others[i]) + np.array(others[j])))
+
+        # Extended Additions (7 points) using PS, PB, PW directions [Source 31, 33]
+        targets = [o for o in others if o in [PS, PB, PW]]
+        for x in targets:
+            # f1 functions
+            em_offsets.append(tuple(2 * np.array(x))) 
+            for y in others:
+                if x != tuple(-np.array(y)) and x != y: # non-opposite
+                    # f2 functions
+                    em_offsets.append(tuple(2 * np.array(x) + np.array(y)))
+        # f3 function for the pair in targets
+        if len(targets) == 2:
+            em_offsets.append(tuple(2 * np.array(targets[0]) + 2 * np.array(targets[1])))
+
+        # 3. Identify white points in EM and find 6-closed paths
+        white_em = [o for o in set(em_offsets) if is_white(o)]
+        if len(white_em) < 4: continue
+
+        # Build connectivity graph for white_em points (6-adjacency)
+        # Check for 6-closed paths using BFS/DFS or labeling
+        # Strict Rule: 'A 6-closed path... encircles p if it contains two points 
+        # of EM(a,d,p) intersection {PT, PN, PE}' [Source 44]
+        
+        # Test intersection
+        essential_pts = [o for o in white_em if o in [PT, PN, PE]]
+        if len(essential_pts) >= 2:
+            # Verify if these points are part of a 6-closed white loop
+            # (Simplified check: if white points form a circuit in the plane)
+            if check_6closed(white_em):
+                return True 
+                
+    return False
+
+def e_p(a, b):
+    """e(a, b, p) is 6-adjacent to s-neighbors a and b [Source 29]"""
+    return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+def v_p(a, b, c):
+    """v(a, b, c, p) is 6-adjacent to e-neighbors e(a,b,p), e(b,c,p), e(c,a,p) [Source 29]"""
+    return (a[0] + b[0] + c[0], a[1] + b[1] + c[1], a[2] + b[2] + c[2])
+
+def f1_p(a):
+    """f1(a, p) is 6-adjacent to s-neighbor a and outside N(p) [Source 30]"""
+    return (2 * a[0], 2 * a[1], 2 * a[2])
+
+def is_e_open(p, mat):
+    """
+    Definition 2: p is not an s-open point and an e-point e(a, b, p) is white
+    while the points f1(a, p), f1(b, p) are black before the iteration.
+    """
+    if is_s_open(p, mat):
+        return False
+
+    def is_black(off):
+        return mat[(p[0]+off[0], p[1]+off[1], p[2]+off[2])]
+
+    for i in range(3):
+        for j in range(i + 1, 3):
+            for a_off in OPPOSITE_PAIRS[i]:
+                for b_off in OPPOSITE_PAIRS[j]:
+                    if (not is_black(e_p(a_off, b_off)) and
+                            is_black(f1_p(a_off)) and
+                            is_black(f1_p(b_off))):
+                        return True
+    return False
+
+def is_v_open(p, mat):
+    """
+    Definition 3: 'p is neither an s-open point nor an e-open point and a
+    v-point v(a, b, c, p) is white while f1(a, p), f1(b, p), f1(c, p)
+    are black before the iteration' [1].
+    """
+    if is_s_open(p, mat) or is_e_open(p, mat):
+        return False
+
+    def is_black(off):
+        return mat[(p[0]+off[0], p[1]+off[1], p[2]+off[2])]
+
+    # Check all triplets: one s-point from each of the three opposite pairs
+    for a_off in OPPOSITE_PAIRS[0]:
+        for b_off in OPPOSITE_PAIRS[1]:
+            for c_off in OPPOSITE_PAIRS[2]:
+                if (not is_black(v_p(a_off, b_off, c_off)) and
+                        is_black(f1_p(a_off)) and
+                        is_black(f1_p(b_off)) and
+                        is_black(f1_p(c_off))):
+                    return True
+    return False
+
+def cond2(p, img, thr):
+    """
+    'cond 2: pair of opposite s-points (a,d) ... sets contain at least one black point'
+    Follows Source [3] exactly.
+    """
+    def is_black_before(p, off, thr):
+        pt = (p[0]+off[0], p[1]+off[1], p[2]+off[2])
+        if 0 <= pt[0] < img.shape[0] and 0 <= pt[1] < img.shape[1] and 0 <= pt[2] < img.shape[2]:
+            return img[pt] >= thr
+        return False  # Treat points outside bounds as white/background
+
+    # Requirement: d must be from the set {pB, pS, pW} [Source 45]
+    # pW = (-1,0,0), pS = (0,-1,0), pB = (0,0,-1) — corrected from (1,0,0) which was pE
+    D_CANDIDATES = {(-1, 0, 0), (0, -1, 0), (0, 0, -1), (1, 0, 0), (0, 1, 0), (0, 0, 1)}
+    # D_CANDIDATES = {(-1, 0, 0), (0, -1, 0), (0, 0, -1)}
+
+    for i in range(3):
+        pair = OPPOSITE_PAIRS[i]
+
+        # Identify which element is d (in D_CANDIDATES) and which is a
+        if pair[0] in D_CANDIDATES:
+            d, a = pair[0], pair[1]
+        elif pair[1] in D_CANDIDATES:
+            d, a = pair[1], pair[0]
+        else:
+            continue  # skip if neither is a valid d
+
+        # Identify other four s-points as pairs (b, e) and (c, f)
+        pair_be = OPPOSITE_PAIRS[(i + 1) % 3]
+        pair_cf = OPPOSITE_PAIRS[(i + 2) % 3]
+        b, e = pair_be
+        c, f = pair_cf
+        
+        # Step 1: Check initial white-point criteria [Source 45]
+        # 'a is white' AND 'd or f1(d, p) is white' (before iteration: value < thr)
+        if not is_black_before(p, a, thr) and \
+           (not is_black_before(p, d, thr) or not is_black_before(p, f1_p(d), thr)):
+            
+            # Step 2: Check each of the 8 sets manually [Source 45]
+            # Each set MUST contain at least one black point before the iteration.
+            
+            # 1. {e(a,b,p), b, e(b,d,p)}
+            if not any(is_black_before(p, off, thr) for off in [e_p(a,b), b, e_p(b,d)]): continue
+            
+            # 2. {e(a,c,p), c, e(c,d,p)}
+            if not any(is_black_before(p, off, thr) for off in [e_p(a,c), c, e_p(c,d)]): continue
+            
+            # 3. {e(a,e,p), e, e(d,e,p)}
+            if not any(is_black_before(p, off, thr) for off in [e_p(a,e), e, e_p(d,e)]): continue
+            
+            # 4. {e(a,f,p), f, e(d,f,p)}
+            if not any(is_black_before(p, off, thr) for off in [e_p(a,f), f, e_p(d,f)]): continue
+            
+            # 5. {v(a,b,c,p), e(b,c,p), v(b,c,d,p)}
+            if not any(is_black_before(p, off, thr) for off in [v_p(a,b,c), e_p(b,c), v_p(b,c,d)]): continue
+            
+            # 6. {v(a,b,f,p), e(b,f,p), v(b,d,f,p)}
+            if not any(is_black_before(p, off, thr) for off in [v_p(a,b,f), e_p(b,f), v_p(b,d,f)]): continue
+            
+            # 7. {v(a,c,e,p), e(c,e,p), v(c,d,e,p)}
+            if not any(is_black_before(p, off, thr) for off in [v_p(a,c,e), e_p(c,e), v_p(c,d,e)]): continue
+            
+            # 8. {v(a,e,f,p), e(e,f,p), v(d, e, f, p)}
+            if not any(is_black_before(p, off, thr) for off in [v_p(a,e,f), e_p(e,f), v_p(d,e,f)]): continue
+            
+            # If all 8 sets passed for this pair (a, d)
+            return True
+            
+    return False
+
+def cond2_len(p, img, thr, min8 = 8):
+    """
+    'cond 2: pair of opposite s-points (a,d) ... sets contain at least one black point'
+    Follows Source [3] exactly.
+    """
+    def is_black_before(p, off, thr):
+        pt = (p[0]+off[0], p[1]+off[1], p[2]+off[2])
+        if 0 <= pt[0] < img.shape[0] and 0 <= pt[1] < img.shape[1] and 0 <= pt[2] < img.shape[2]:
+            return img[pt] >= thr
+        return False  # Treat points outside bounds as white/background
+
+    # Requirement: d must be from the set {pB, pS, pW} [Source 45]
+    # pW = (-1,0,0), pS = (0,-1,0), pB = (0,0,-1) — corrected from (1,0,0) which was pE
+    D_CANDIDATES = {(-1, 0, 0), (0, -1, 0), (0, 0, -1), (1, 0, 0), (0, 1, 0), (0, 0, 1)}
+    # D_CANDIDATES = {(-1, 0, 0), (0, -1, 0), (0, 0, -1)}
+
+    for i in range(3):
+        pair = OPPOSITE_PAIRS[i]
+
+        # Identify which element is d (in D_CANDIDATES) and which is a
+        if pair[0] in D_CANDIDATES:
+            d, a = pair[0], pair[1]
+        elif pair[1] in D_CANDIDATES:
+            d, a = pair[1], pair[0]
+        else:
+            continue  # skip if neither is a valid d
+
+        # Identify other four s-points as pairs (b, e) and (c, f)
+        pair_be = OPPOSITE_PAIRS[(i + 1) % 3]
+        pair_cf = OPPOSITE_PAIRS[(i + 2) % 3]
+        b, e = pair_be
+        c, f = pair_cf
+        
+        # Step 1: Check initial white-point criteria [Source 45]
+        # 'a is white' AND 'd or f1(d, p) is white' (before iteration: value < thr)
+        if not is_black_before(p, a, thr) and (not is_black_before(p, d, thr) or not is_black_before(p, f1_p(d), thr)):
+            sets = [
+                    [e_p(a,b), b, e_p(b,d)],              # Set 1
+                    [e_p(a,c), c, e_p(c,d)],              # Set 2
+                    [e_p(a,e), e, e_p(d,e)],              # Set 3
+                    [e_p(a,f), f, e_p(d,f)],              # Set 4
+                    [v_p(a,b,c), e_p(b,c), v_p(b,c,d)],    # Set 5
+                    [v_p(a,b,f), e_p(b,f), v_p(b,d,f)],    # Set 6
+                    [v_p(a,c,e), e_p(c,e), v_p(c,d,e)],    # Set 7
+                    [v_p(a,e,f), e_p(e,f), v_p(d,e,f)]     # Set 8
+                ]
+            
+            sets_passed = sum(1 for s in sets if any(is_black_before(p, off, thr) for off in s))
+
+            if sets_passed >= min8:
+                return True
+            
+    return False
+
+def check_26_connectivity_8ring(black_offsets):
+    """Checks if the black points in the 8-point middle plane ring are 26-connected."""
+    if not black_offsets:
+        return True
+
+    visited = {black_offsets[0]}
+    stack = [black_offsets[0]]
+
+    while stack:
+        curr = stack.pop()
+        for other in black_offsets:
+            if other not in visited:
+                if max(abs(curr[0]-other[0]), abs(curr[1]-other[1]), abs(curr[2]-other[2])) <= 1:
+                    visited.add(other)
+                    stack.append(other)
+
+    return len(visited) == len(black_offsets)
+
+
+def cond3(p, img, thr):
+    """
+    'cond 3: every middle plane'
+    Checks if p satisfies Condition 3 for all three coordinate planes.
+    """
+    def is_black_before(offset):
+        pt = (p[0]+offset[0], p[1]+offset[1], p[2]+offset[2])
+        return img[pt] >= thr - 1
+
+    def is_black_current(offset):
+        pt = (p[0]+offset[0], p[1]+offset[1], p[2]+offset[2])
+        return img[pt] >= 0
+
+    for i in range(3):
+        a, d = OPPOSITE_PAIRS[i]
+
+        mid_s_pairs = [OPPOSITE_PAIRS[j] for j in range(3) if j != i]
+        b, e = mid_s_pairs[0]
+        c, f = mid_s_pairs[1]
+
+        mid_e_points = [e_p(b, c), e_p(c, e), e_p(e, f), e_p(f, b)]
+        mid_s_points = [b, e, c, f]
+
+        # All e-points black before current iteration → this plane is satisfied
+        if all(is_black_before(ep) for ep in mid_e_points):
+            continue
+
+        # Tunnel exists if all mid-plane s-points are currently black
+        if all(is_black_current(sp) for sp in mid_s_points):
+            return False
+
+        # Current black points in the middle plane must form a single 26-component
+        all_plane_offsets = mid_s_points + mid_e_points
+        current_black_offsets = [o for o in all_plane_offsets if is_black_current(o)]
+
+        if not current_black_offsets:
+            return False
+
+        if not check_26_connectivity_8ring(current_black_offsets):
+            return False
+
+    return True
+
+
+def is_shape_point(p, img, thr):
+    mat = (img >= thr-1)
+    if mat[p] == 0: return False
+
+    return cond1(p, img, thr) or cond2_len(p, img, thr)
+
+def is_simple_point(p, full_mat):
+    """
+    Checks if a voxel is a (26, 6) simple point using only loops and numpy.
+    
+    'simple point: (26,6) 
+    1. p has at least one black 26-neighbor. 
+    2. p has at least one white 6-neighbor. 
+    3. The set of black 26-neighbors of p is 26-connected. 
+    4. The set of white 6-neighbors of p is 6-connected in the set of white 18-neighbors of p.'
+    """
+    z, y, x = p
+    # Extract the 3x3x3 neighborhood. Center is at (1, 1, 1)
+    # Note: 1 = black, 0 = white
+    nb = full_mat[z-1:z+2, y-1:y+2, x-1:x+2].astype(np.int8)
+    
+    # Neighborhood Offset Definitions [3, 4]
+    S_OFFS = [(-1,0,0), (1,0,0), (0,-1,0), (0,1,0), (0,0,-1), (0,0,1)]
+    
+    # Generate all 26-neighbors (all points in 3x3x3 except center) [4, 5]
+    N26_OFFS = []
+    for dz in [-1, 0, 1]:
+        for dy in [-1, 0, 1]:
+            for dx in [-1, 0, 1]:
+                if dz == 0 and dy == 0 and dx == 0: continue
+                N26_OFFS.append((dz, dy, dx))
+                
+    # 18-neighbors (s-points + e-points) [4, 5]
+    N18_OFFS = [o for o in N26_OFFS if abs(o[0]) + abs(o[1]) + abs(o[2]) <= 2]
+
+    # --- 1. Black 26-neighbor check ---
+    black_26_coords = []
+    for dz, dy, dx in N26_OFFS:
+        if nb[1+dz, 1+dy, 1+dx] == 1:
+            black_26_coords.append((1+dz, 1+dy, 1+dx))
+    if not black_26_coords:
+        return False
+
+    # --- 2. White 6-neighbor check ---
+    white_6_coords = []
+    for dz, dy, dx in S_OFFS:
+        if nb[1+dz, 1+dy, 1+dx] == 0:
+            white_6_coords.append((1+dz, 1+dy, 1+dx))
+    if not white_6_coords:
+        return False
+
+    # --- 3. Black 26-connectivity check ---
+    # We must ensure all black 26-neighbors form a single component using 26-adjacency
+    visited = np.zeros((3, 3, 3), dtype=bool)
+    stack = [black_26_coords[0]]
+    visited[black_26_coords[0]] = True
+    reachable_black_count = 0
+    
+    while stack:
+        cz, cy, cx = stack.pop()
+        reachable_black_count += 1
+        # Check all 26 possible neighbors for each visited black point
+        for dz, dy, dx in N26_OFFS:
+            nz, ny, nx = cz + dz, cy + dy, cx + dx
+            # Must stay within 3x3x3 and not be the center point p
+            if 0 <= nz < 3 and 0 <= ny < 3 and 0 <= nx < 3 and not (nz == 1 and ny == 1 and nx == 1):
+                if nb[nz, ny, nx] == 1 and not visited[nz, ny, nx]:
+                    visited[nz, ny, nx] = True
+                    stack.append((nz, ny, nx))
+                    
+    if reachable_black_count != len(black_26_coords):
+        return False
+
+    # --- 4. White 6-connectivity in White 18-neighbors ---
+    # We must ensure all white 6-neighbors are connected to each other 
+    # through a path of white 18-neighbors using only 6-connectivity steps.
+    
+    # Territory: set of white points that are at least 18-adjacent to p
+    white_18_mask = np.zeros((3, 3, 3), dtype=bool)
+    for dz, dy, dx in N18_OFFS:
+        if nb[1+dz, 1+dy, 1+dx] == 0:
+            white_18_mask[1+dz, 1+dy, 1+dx] = True
+            
+    visited_w = np.zeros((3, 3, 3), dtype=bool)
+    stack_w = [white_6_coords[0]]
+    visited_w[white_6_coords[0]] = True
+    reachable_white_6_count = 0
+    
+    # Set of s-point coordinates in the 3x3x3 grid for easy counting
+    s_point_set = set((1+dz, 1+dy, 1+dx) for dz, dy, dx in S_OFFS)
+    
+    while stack_w:
+        cz, cy, cx = stack_w.pop()
+        if (cz, cy, cx) in s_point_set:
+            reachable_white_6_count += 1
+            
+        # Move only in 6 directions (6-connectivity)
+        for dz, dy, dx in S_OFFS:
+            nz, ny, nx = cz + dz, cy + dy, cx + dx
+            if 0 <= nz < 3 and 0 <= ny < 3 and 0 <= nx < 3:
+                # Path must stay within white 18-neighbors
+                if white_18_mask[nz, ny, nx] and not visited_w[nz, ny, nx]:
+                    visited_w[nz, ny, nx] = True
+                    stack_w.append((nz, ny, nx))
+                    
+    if reachable_white_6_count != len(white_6_coords):
+        return False
+
+    return True
+
+def thin_3d_saha(voxels, final_thinning = True):
+    img = np.where(voxels > 0, 0, -MAXINT-1)
+    img = np.pad(img, 2, constant_values=-MAXINT-1)
+    
+    i = 0
+    changed = True
+    while changed:
+        i += 1
+        changed = False
+        thr = -MAXINT + i
+        old_img = (img >= thr-1) 
+        print('old_img', old_img.sum())
+        
+        numso = 0
+        # 1: s-open points
+        for p_idx in np.argwhere(img == 0):
+            p = tuple(p_idx)
+            if is_s_open(p, old_img):
+                numso += 1
+                if is_shape_point(p, img, thr):
+                    img[p] = i
+                elif is_simple_point(p, img >= 0):
+                    img[p] = thr
+                    changed = True
+
+        print('iteration', i)
+        print('num s-open', numso)
+        print('marked', (img > 0).sum())
+        print('marked this it', (img == i).sum())
+        print('unmarked', (img == 0).sum())
+        print('deleted this it', (img == thr).sum())
+
+        # 2: e-open points
+        for p_idx in np.argwhere(img == 0):
+            p = tuple(p_idx)
+            if is_e_open(p, old_img) and cond3(p, img, thr) and is_simple_point(p, img >= 0): 
+                img[p] = thr
+                changed = True
+
+        # 3: v-open points
+        for p_idx in np.argwhere(img == 0):
+            p = tuple(p_idx)
+            if is_v_open(p, old_img) and is_simple_point(p, img >= 0):
+                img[p] = thr
+                changed = True
+
+    # if final_thinning:
+    #     # final-thinning: thick slanted surfaces
+    #     final_old_mask = (img >= 0)
+    #     for p_idx in np.argwhere(img >= 0):
+    #         p = tuple(p_idx)
+    #         # def 6: erodable if simple, conditions 4, 5, or 6
+    #         if is_simple(p, img >= 0) and thick(p, final_old_mask):
+    #             img[p] = -MAXINT + i
+            
+    return img[2:-2, 2:-2, 2:-2] >= 0, img[2:-2, 2:-2, 2:-2], i
+
+start = time.time()
+
+voxeld = np.load('s01_voxel.npy')
+sub = voxeld[80:180, 750:850, 850:950]
+sub = sub[::2, ::2, ::2]
+
+labeled, n = label(sub, structure=np.ones((3,3,3)))
+if n > 0:
+    counts = np.bincount(labeled.ravel())
+    counts[0] = 0
+    sub = (labeled == counts.argmax())
+
+print('input extracted')
+
+ske,img,fi = thin_3d_saha(sub)
+print(f'true cnt: {ske.sum()}')
+np.save('s01_ske.npy', ske)
+scout('../scad/ske8.10', render_3d_mat(ske))
+scout('../scad/img8.10', render_3d_mat_color(img, fi))
+# scout('../scad/img8.10', render_3d_mat_color2(ske))
+# np.save('s01_8_skeleton.npy', skeleton);
+
+print(f"elapsed: {time.time() - start:.2f} seconds")
