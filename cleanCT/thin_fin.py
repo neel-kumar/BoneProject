@@ -970,7 +970,6 @@ def thin_3d_saha(voxels, run_final_thinning=True):
     return img[2:-2, 2:-2, 2:-2] >= 0, img[2:-2, 2:-2, 2:-2], i
 
 # PARALLEL
-import numpy as np
 import threading
 
 def subfield_worker(img, old_img, thr, l, scan_type, z_range, iteration_num):
@@ -1121,56 +1120,65 @@ def calculate_bone_quantification(expanded, skeleton_cla, voxel_size=1.0):
     }
 
 
-start = time.time()
-
-savename = 'rand8'
-print('saving data to:', savename)
-
 voxeld = np.load('s01_voxel.npy')
 print(voxeld.shape)
-# rng = np.random.default_rng()
-# r1 = rng.integers(low=80, high=1400)
-# r2 = rng.integers(low=350, high=1100)
-# r3 = rng.integers(low=350, high=1100)
-# sub = voxeld[r1:r1+101, r2:r2+101, r3:r3+101]
-# print('random submatrix', r1, r1+101, r2, r2+101, r3, r3+101)
-sub = voxeld[80:180, 750:850, 850:950]
-# sub = voxeld[455:556, 1098:1199, 1023:1124]
-# random submatrix 1393 1494 692 793 808 909
-# sub = sub[::2, ::2, ::2]
+rng = np.random.default_rng()
 
-labeled, n = label(sub, structure=np.ones((3,3,3)))
-if n > 0:
-    counts = np.bincount(labeled.ravel())
-    counts[0] = 0
-    sub = (labeled == counts.argmax())
+for i in range(2, 12):
+    run_start = time.time()
+    savename = f'rand{i}'
+    print(f'\n--- Starting run: {savename} ---')
 
-print('input extracted')
+    r1 = rng.integers(low=80, high=1400)
+    r2 = rng.integers(low=350, high=1100)
+    r3 = rng.integers(low=350, high=1100)
+    z_range = [int(r1), int(r1+100)]
+    y_range = [int(r2), int(r2+100)]
+    x_range = [int(r3), int(r3+100)]
+    print(f'random submatrix {z_range[0]} {z_range[1]} {y_range[0]} {y_range[1]} {x_range[0]} {x_range[1]}')
+    
+    sub = voxeld[z_range[0]:z_range[1], y_range[0]:y_range[1], x_range[0]:x_range[1]]
 
-# ske,img,fi = thin_3d_saha(sub)
-ske,img,fi = thin_3d_parallel_threaded(sub)
-print(f"elapsed thin: {time.time() - start:.2f} seconds")
-print(f'true cnt: {ske.sum()}')
-np.save('ske_'+savename+'.npy', ske)
-# ske = np.load('s01_80180div2_ske.npy')
-# scout('../scad/img8.11', render_3d_mat_color(img, fi))
-cla = classify_mat(ske)
-expanded = expand_labels(img, cla, fi)
-scout('../scad/orig_'+savename, render_3d_mat(sub))
-scout('../scad/img_'+savename, color_class(cla))
-scout('../scad/expimg_'+savename, color_class(expanded))
+    labeled, n = label(sub, structure=np.ones((3,3,3)))
+    if n > 0:
+        counts = np.bincount(labeled.ravel())
+        counts[0] = 0
+        sub = (labeled == counts.argmax())
 
-quant = calculate_bone_quantification(expanded, cla)
+    print('input extracted')
 
-with open('quant_'+savename+'.json', 'w') as json_file:
-    json.dump(quant, json_file, indent=4) # indent for human readability
+    # ske,img,fi = thin_3d_saha(sub)
+    ske,img,fi = thin_3d_parallel_threaded(sub)
+    print(f"elapsed thin: {time.time() - run_start:.2f} seconds")
+    print(f'true cnt: {ske.sum()}')
+    np.save('ske_'+savename+'.npy', ske)
+    # ske = np.load('s01_80180div2_ske.npy')
+    # scout('../scad/img8.11', render_3d_mat_color(img, fi))
+    cla = classify_mat(ske)
+    np.save('classified_ske_'+savename+'.npy', ske)
+    expanded = expand_labels(img, cla, fi)
+    np.save('classified_'+savename+'.npy', ske)
+    # scout('../scad/orig_'+savename, render_3d_mat(sub))
+    # scout('../scad/img_'+savename, color_class(cla))
+    # scout('../scad/expimg_'+savename, color_class(expanded))
 
-print("\n--- Bone Quantification ---")
-print(f"TV: {quant['TV']:.0f} | BV/TV: {quant['BV/TV']} | "
-      f"Porosity: {quant['porosity']:.4f} | Pore size: {quant['pore_size']:.4f}")
-print(f"  Plates | pBV/TV: {quant['pBV/TV']:.4f} | pTb.Th: {quant['pTb.Th']:.4f} | "
-      f"pTb.N: {quant['pTb.N']:.4f} | pBV/BV: {quant['pBV/BV']:.4f}")
-print(f"  Rods   | rBV/TV: {quant['rBV/TV']:.4f} | rTb.Th: {quant['rTb.Th']:.4f} | "
-      f"rTb.N: {quant['rTb.N']:.4f} | rBV/BV: {quant['rBV/BV']:.4f}")
+    quant = calculate_bone_quantification(expanded, cla)
+    quant['range'] = {
+        'z': z_range,
+        'y': y_range,
+        'x': x_range
+    }
 
-print(f"elapsed: {time.time() - start:.2f} seconds")
+    with open('quant_'+savename+'.json', 'w') as json_file:
+        json.dump(quant, json_file, indent=4) # indent for human readability
+
+    print("\n--- Bone Quantification ---")
+    print(f"TV: {quant['TV']:.0f} | BV/TV: {quant['BV/TV']} | "
+          f"Porosity: {quant['porosity']:.4f} | Pore size: {quant['pore_size']:.4f}")
+    print(f"  Plates | pBV/TV: {quant['pBV/TV']:.4f} | pTb.Th: {quant['pTb.Th']:.4f} | "
+          f"pTb.N: {quant['pTb.N']:.4f} | pBV/BV: {quant['pBV/BV']:.4f}")
+    print(f"  Rods   | rBV/TV: {quant['rBV/TV']:.4f} | rTb.Th: {quant['rTb.Th']:.4f} | "
+          f"rTb.N: {quant['rTb.N']:.4f} | rBV/BV: {quant['rBV/BV']:.4f}")
+
+    print(f"Run {savename} elapsed: {time.time() - run_start:.2f} seconds")
+
