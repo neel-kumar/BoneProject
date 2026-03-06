@@ -1,8 +1,11 @@
+from datetime import datetime
 from pathlib import Path
 import time
 import cv2
 import numpy as np
 import re
+import glob
+import sys
 
 from solid import *
 from solid.utils import *
@@ -26,31 +29,29 @@ def slice_mid(mat, dim = [100,100]):
     cy, cx = mat.shape[0] // 2, mat.shape[1] // 2
     return mat[cy-dim[0]:cy+dim[0], cx-dim[1]:cx+dim[1]]
 
-in_dir = 'C:/Users/dumbo/code/BoneProject/micro_CT/micro_CT/micro_CT/S.01/A_Rec/'
-out_dir = 'C:/Users/dumbo/code/BoneProject/cleanCT/bmp/'
+# First argument is the directory name containing the CT Scan
+# Specify the directory name without the /, since this string is used to construct the output file name.
+in_dir = sys.argv[1]
+print(f"Processing directory {in_dir}")
+
 thresh_val = 85
 
 start = time.time()
 
-directory = Path(in_dir)
 # cur_vert = 0
 # voxel_size = 0.1
 # objs = []
 voxelized = []
-for file in directory.iterdir():  
-    if not file.is_file() or Path(file).suffix != '.bmp' or not bool(re.match(r'A__rec\d{8}$', Path(file).stem)):
-        continue
-    print(Path(file).stem)
-
-    filen = Path(file).stem + '.bmp'
-    path = in_dir + filen
-    img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+for file in sorted(glob.glob(f"{in_dir}/*/*rec[0-9]*.bmp")):
+    print(f"{datetime.now()} - Loading file: {file}")
+    img = cv2.imread(file, cv2.IMREAD_GRAYSCALE)
     binary = img > thresh_val
     voxelized.append(binary)
 
 voxelized = np.stack(voxelized)
 print(voxelized.shape)
-np.save('s01_voxel.npy', voxelized)
+print(f"Saving file: {in_dir}_voxel.npy")
+np.save(f"{in_dir}_voxel.npy", voxelized)
 # scout('../scad/slices', obj)
 end = time.time()
 print(f"Elapsed: {end - start:.2f} seconds")

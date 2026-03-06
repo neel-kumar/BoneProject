@@ -12,7 +12,7 @@ def scout(filename, obj, to_stl=False):
         print("to stl")
         subprocess.run([r'C:\Program Files\OpenSCAD\openscad.exe', '-o', filename + '.stl', './' + filename + '.scad'])
 
-def render_3d_mat(mat, cube_size=0.1):
+def render_3d_mat(mat, cube_size=1):
     positions = np.argwhere(mat)
     if len(positions) == 0:
         return cube(0)
@@ -48,10 +48,12 @@ def largest_connected_component(mat):
     largest_label = counts.argmax()
     return labeled == largest_label
 
-# voxeld = np.load('s01_voxel.npy')
+start = time.time()
+
+voxeld = np.load('s01_voxel.npy')
 # # sub = voxeld[80:180, 700:800, 800:900]
 # # sub = voxeld[550:650, 700:800, 800:900]
-# sub = voxeld[80:180, 750:850, 850:950]
+sub = voxeld[80:180, 750:850, 850:950]
 # sub = sub[::2, ::2, ::2]
 #
 # np.save('s01_voxel_8.npy', sub);
@@ -59,15 +61,14 @@ def largest_connected_component(mat):
 # print(sub.shape)
 # ske = skeletonize(sub)
 # print(ske.shape)
-# print(f'true cnt: {ske.sum()}')
-#
-# scout('../scad/test', render_3d_mat(ske));
-
-start = time.time()
-
-sub = np.load('s01_sub_ske_full.npy')
-print(sub.shape)
-scout('../scad/ske_full', render_3d_mat(sub));
 print(f'true cnt: {sub.sum()}')
+
+scout('../scad/test', render_3d_mat(sub));
+
+
+# sub = np.load('s01_sub_ske_full.npy')
+# print(sub.shape)
+# scout('../scad/ske_full', render_3d_mat(sub));
+# print(f'true cnt: {sub.sum()}')
 
 print(f"elapsed: {time.time() - start:.2f} seconds")

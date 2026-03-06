@@ -1,3 +1,4 @@
+import sys
 import time
 import subprocess
 from collections import deque
@@ -1119,8 +1120,9 @@ def calculate_bone_quantification(expanded, skeleton_cla, voxel_size=1.0):
         "rBV/BV": r_vox / total_bone_vox if total_bone_vox > 0 else 0,
     }
 
-
-voxeld = np.load('s01_voxel.npy')
+voxel_file = sys.argv[1]
+print(f"Loading file {voxel_file}")
+voxeld = np.load(voxel_file)
 print(voxeld.shape)
 rng = np.random.default_rng()
 

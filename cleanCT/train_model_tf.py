@@ -97,30 +97,60 @@ class ConditionalLDM(models.Model):
 # 4. DATASET UTILITIES
 # =================================================================
 
-def load_bone_data(sample_names, target_size=(100, 100, 100)):
+def get_all_datasets():
+    import glob
+    import re
+    # Directories to search
+    base_dirs = glob.glob('../../microCT/S.*_fins*') + ['./ctbins']
+    datasets = []
+    
+    for d in base_dirs:
+        # Find all ske_rand*.npy in this directory
+        ske_files = glob.glob(os.path.join(d, 'ske_rand*.npy'))
+        for ske_path in ske_files:
+            # Extract name/number
+            match = re.search(r'ske_(rand\d+)\.npy', os.path.basename(ske_path))
+            if not match:
+                continue
+            name = match.group(1)
+            quant_path = os.path.join(d, f'quant_{name}.json')
+            
+            if os.path.exists(quant_path):
+                datasets.append({
+                    'name': name,
+                    'ske_path': ske_path,
+                    'quant_path': quant_path
+                })
+    return datasets
+
+def load_bone_data(target_size=(100, 100, 100)):
     all_skeletons = []
     all_params = []
     param_keys = ["BV/TV", "porosity", "pore_size", "pBV/TV", "pTb.Th", "pTb.N", "rBV/TV", "rTb.Th"]
     
+    datasets = get_all_datasets()
+    print(f"Found {len(datasets)} data samples.")
+    
     print("Loading and preprocessing data...")
-    for name in sample_names:
-        ske_path = f'ske_{name}.npy'
-        quant_path = f'quant_{name}.json'
+    for ds in datasets:
+        ske_path = ds['ske_path']
+        quant_path = ds['quant_path']
         
-        if os.path.exists(ske_path) and os.path.exists(quant_path):
-            ske = np.load(ske_path).astype(np.float32)
-            with open(quant_path, 'r') as f:
-                quant = json.load(f)
-            
-            # Resize 3D volume
-            factors = [t / s for t, s in zip(target_size, ske.shape)]
-            ske_resized = zoom(ske, factors, order=1)
-            ske_resized = np.expand_dims(ske_resized, axis=-1) # Add channel dim
-            
-            params = [quant[k] for k in param_keys]
-            
-            all_skeletons.append(ske_resized)
-            all_params.append(params)
+        ske = np.load(ske_path).astype(np.float32)
+        with open(quant_path, 'r') as f:
+            quant = json.load(f)
+        
+        # Resize 3D volume
+        factors = [t / s for t, s in zip(target_size, ske.shape)]
+        ske_resized = zoom(ske, factors, order=1)
+        ske_resized = np.expand_dims(ske_resized, axis=-1) # Add channel dim
+        
+        params = [quant[k] for k in param_keys]
+        
+        all_skeletons.append(ske_resized)
+        all_params.append(params)
+        if len(all_skeletons) % 50 == 0:
+            print(f"  Loaded {len(all_skeletons)} samples...")
     
     if not all_skeletons:
         return None, None, None, None
@@ -163,16 +193,42 @@ def train_pipeline(skeletons, params, epochs=1000, batch_size=2):
         vae_optimizer.apply_gradients(zip(grads, vae.trainable_variables))
         return total_loss
 
+    best_acc = 0.0
+    patience_count = 0
+    patience_limit = 10
+    min_delta = 1e-4
+
     for epoch in range(epochs):
         epoch_loss = 0
+        total_acc = 0
         for x_batch, _ in dataset:
             loss = train_step_vae(x_batch)
             epoch_loss += loss
+            
+            # Compute Binary Accuracy for VAE reconstruction
+            recon = vae(x_batch)
+            acc = tf.reduce_mean(tf.cast(tf.equal(tf.round(x_batch), tf.round(recon)), tf.float32))
+            total_acc += acc
+            
         avg_loss = epoch_loss/len(dataset)
+        avg_acc = total_acc/len(dataset)
         if (epoch + 1) % 10 == 0:
-            print(f"Epoch {epoch+1}/{epochs}, VAE Loss: {avg_loss:.7f}")
+            print(f"Epoch {epoch+1}/{epochs}, VAE Loss: {avg_loss:.7f}, Acc: {avg_acc:.2f}")
+            # Save periodic checkpoint
+            vae.save(f"cp_vae_ep{epoch+1:02d}_acc{avg_acc:.2f}.keras")
+        
+        # Early Stopping check
+        if avg_acc > (best_acc + min_delta):
+            best_acc = avg_acc
+            patience_count = 0
+        else:
+            patience_count += 1
+            
+        if patience_count >= patience_limit:
+            print(f"VAE Early stopping at epoch {epoch+1}: accuracy plateaued at {best_acc:.4f}")
+            break
+
         if avg_loss < 1e-6:
-            print(f"VAE converged at epoch {epoch+1}")
             break
 
     # Phase 2: Train Feature Predictor
@@ -197,8 +253,9 @@ def train_pipeline(skeletons, params, epochs=1000, batch_size=2):
         avg_loss = epoch_loss/len(dataset)
         if (epoch + 1) % 10 == 0:
             print(f"Epoch {epoch+1}/{epochs}, FP Loss: {avg_loss:.7f}")
+            # Regression model: accuracy isn't defined, saving with loss label
+            fp.save(f"cp_fp_ep{epoch+1:02d}_loss{avg_loss:.4f}.keras")
         if avg_loss < 1e-6:
-            print(f"FP converged at epoch {epoch+1}")
             break
 
     # Phase 3: Train Latent Diffusion
@@ -231,25 +288,26 @@ def train_pipeline(skeletons, params, epochs=1000, batch_size=2):
         avg_loss = epoch_loss/len(dataset)
         if (epoch + 1) % 10 == 0:
             print(f"Epoch {epoch+1}/{epochs}, LDM Loss: {avg_loss:.7f}")
+            # LDM is subclassed, saving weights
+            ldm.save_weights(f"cp_ldm_ep{epoch+1:02d}_loss{avg_loss:.4f}.weights.h5")
         if avg_loss < 1e-6:
-            print(f"LDM converged at epoch {epoch+1}")
             break
 
     return vae, fp, ldm
 
 if __name__ == "__main__":
-    sample_names = [f'rand{i}' for i in range(1, 34)]
-    skeletons, params, p_mean, p_std = load_bone_data(sample_names)
+    skeletons, params, p_mean, p_std = load_bone_data()
     
     if skeletons is not None:
         print(f"Dataset ready. Skeletons: {skeletons.shape}, Params: {params.shape}")
-        vae, fp, ldm = train_pipeline(skeletons, params, epochs=1000)
+        # vae, fp, ldm = train_pipeline(skeletons, params, epochs=1000)
+        vae, fp, ldm = train_pipeline(skeletons, params, epochs=100)
         
         # Save models
-        vae.save("vae_bone_tf")
-        fp.save("fp_bone_tf")
+        vae.save("vae_bone_tf.keras")
+        fp.save("fp_bone_tf.keras")
         # LDM is a subclassed model, saving weights
-        ldm.save_weights("ldm_bone_tf_weights.h5")
+        ldm.save_weights("ldm_bone_tf_weights.weights.h5")
         print("\nTraining complete and models saved.")
     else:
         print("No data files found. Please run thin_fin.py first.")
